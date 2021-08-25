@@ -23,6 +23,7 @@
 
 #include <ntddk.h>
 #include <wdf.h>
+#include <wsk.h>
 
 VOID
 OvpnTimerReset(WDFTIMER timer, ULONG dueTime);
@@ -40,4 +41,6 @@ OvpnTimerDestroy(_Inout_ WDFTIMER* timer);
 
 _Must_inspect_result_
 BOOLEAN
-OvpnTimerIsKeepaliveMessage(_In_reads_(len) const PUCHAR buf, SIZE_T len);
+OvpnTimerIsKeepaliveMessage(MDL* mdl, SIZE_T length, SIZE_T offset);
+
+#define OVPN_KEEPALIVE_MESSAGE_SIZE 16

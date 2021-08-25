@@ -22,20 +22,59 @@
 #include "adapter.h"
 #include "txqueue.h"
 #include "rxqueue.h"
-#include "driverhelper\trace.h"
+#include "trace.h"
 #include "driver.h"
 
 // maximum link speed for send and recv in bps
 #define OVPN_MEDIA_MAX_SPEED 1'000'000'000
 
+EVT_NET_ADAPTER_RETURN_RX_BUFFER OvpnEvtAdapterReturnRxBuffer;
+
+_Use_decl_annotations_
+void
+OvpnEvtAdapterReturnRxBuffer(NETADAPTER netAdapter, NET_FRAGMENT_RETURN_CONTEXT_HANDLE rxReturnContext)
+{
+    POVPN_ADAPTER adapter = OvpnGetAdapterContext(netAdapter);
+    POVPN_DEVICE device = OvpnGetDeviceContext(adapter->WdfDevice);
+
+    OVPN_RX_WORKITEM* work = (OVPN_RX_WORKITEM*)rxReturnContext;
+
+    if (work) {
+        WSK_SOCKET* socket = device->Socket.Socket;
+
+        if (work->Tcp) {
+            IoFreeMdl(work->Mdl);
+
+            if (work->DUMMYUNION.TCP.PacketBuf != NULL) {
+                // return buffer if we fetched it (decrypt was not in-place)
+                OvpnBufferPoolPut(device->TcpDataRxPool, work->DUMMYUNION.TCP.PacketBuf);
+            }
+            if (work->DUMMYUNION.TCP.DataIndication) {
+                LOG_IF_NOT_NT_SUCCESS(((WSK_PROVIDER_CONNECTION_DISPATCH*)socket->Dispatch)->WskRelease(socket, (WSK_DATA_INDICATION*)work->DUMMYUNION.TCP.DataIndication));
+            }
+        } else {
+            LOG_IF_NOT_NT_SUCCESS(((WSK_PROVIDER_DATAGRAM_DISPATCH*)socket->Dispatch)->WskRelease(socket, (WSK_DATAGRAM_INDICATION*)work->DUMMYUNION.DatagramIndication));
+        }
+
+        OvpnBufferPoolPut(device->RxPool, work);
+    }
+}
+
 static void
 OvpnAdapterSetDatapathCapabilities(_In_ POVPN_ADAPTER adapter)
 {
+    static NET_ADAPTER_DMA_CAPABILITIES cap = {0};
+    cap.Size = sizeof(NET_ADAPTER_DMA_CAPABILITIES);
+
     NET_ADAPTER_TX_CAPABILITIES txCapabilities;
     NET_ADAPTER_TX_CAPABILITIES_INIT(&txCapabilities, 1);
 
+    // workaround for NetAdapterCx bug
+    txCapabilities.DmaCapabilities = &cap;
+    txCapabilities.PayloadBackfill = OVPN_PAYLOAD_BACKFILL;
+
     NET_ADAPTER_RX_CAPABILITIES rxCapabilities;
-    NET_ADAPTER_RX_CAPABILITIES_INIT_SYSTEM_MANAGED(&rxCapabilities, 65536, 1);
+    NET_ADAPTER_RX_CAPABILITIES_INIT_DRIVER_MANAGED(&rxCapabilities, OvpnEvtAdapterReturnRxBuffer, 65536, 1);
 
     NetAdapterSetDataPathCapabilities(adapter->NetAdapter, &txCapabilities, &rxCapabilities);
 }
@@ -137,7 +176,7 @@ done:
 
 _Use_decl_annotations_
 NTSTATUS
-OvpnAdapterCreate(OVPN_DEVICE * device) {
+OvpnAdapterCreate(OVPN_DEVICE* device) {
     NTSTATUS status = STATUS_SUCCESS;
 
     NETADAPTER_INIT* adapterInit = NetAdapterInitAllocate(device->WdfDevice);

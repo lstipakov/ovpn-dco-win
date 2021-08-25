@@ -24,9 +24,37 @@
 #include <wsk.h>
 #include <wdf.h>
 
-#include "driverhelper\buffers.h"
+#include "bufferpool.h"
 
 #define OVPN_SOCKET_PACKET_BUFFER_SIZE 2048
+
+typedef struct _OVPN_TX_WORKITEM {
+	PMDL Mdl; // MDL to be freed by send completion callback
+	NET_PACKET* Packet;
+	OVPN_BUFFER_POOL Pool;
+	UCHAR* TcpData;
+	OVPN_BUFFER_POOL TcpDataPool;
+	WDFQUEUE IoQueue;
+} OVPN_TX_WORKITEM;
+
+typedef struct _OVPN_RX_WORKITEM {
+	LIST_ENTRY ListEntry;
+
+	MDL* Mdl;
+	SIZE_T Length;
+	SIZE_T Offset;
+
+	BOOLEAN Tcp;
+	union {
+		struct {
+			VOID* PacketBuf;
+			WSK_DATA_INDICATION* DataIndication;
+		} TCP;
+
+		WSK_DATAGRAM_INDICATION* DatagramIndication;
+	} DUMMYUNION;
+
+} OVPN_RX_WORKITEM;
 
 struct OvpnSocketTcpState
 {
@@ -39,23 +67,18 @@ struct OvpnSocketTcpState
 	USHORT BytesRead;
 
 	// packet buffer if packet is scattered across MDLs
-	UCHAR PacketBuf[OVPN_SOCKET_PACKET_BUFFER_SIZE];
-};
+	UCHAR* PacketBuf;
 
-struct OvpnSocketUdpState
-{
-	// packet buffer if datagram scattered across MDLs
-	// this seems to only happen in unlikely case when datagram is fragmented
-	UCHAR PacketBuf[OVPN_SOCKET_PACKET_BUFFER_SIZE];
+	WSK_DATA_INDICATION* LastDataIndication;
 };
 
 struct OvpnSocket
 {
+	SIZE_T TransportOverhead; // 0 for UDP, 2 for TCP
 	BOOLEAN Tcp;
 	PWSK_SOCKET Socket;
 
 	OvpnSocketTcpState TcpState;
-	OvpnSocketUdpState UdpState;
 };
 
 _Must_inspect_result_
@@ -72,8 +95,8 @@ OvpnSocketClose(_In_ PWSK_SOCKET socket);
 
 _Must_inspect_result_
 NTSTATUS
-OvpnSocketSendTxBuffer(_In_ OvpnSocket* socket, _In_ OVPN_TX_BUFFER* buffer, _Out_ BOOLEAN* wskSendCalled);
+OvpnSocketTcpConnect(_In_ PWSK_SOCKET socket, _In_ PVOID context, _In_ PSOCKADDR remote);
 
 _Must_inspect_result_
 NTSTATUS
-OvpnSocketTcpConnect(_In_ PWSK_SOCKET socket, _In_ PVOID context, _In_ PSOCKADDR remote);
+OvpnSocketSend(_In_ OvpnSocket* ovpnSocket, _In_ PMDL pmdl, SIZE_T offset, SIZE_T length, _In_ OVPN_TX_WORKITEM* workItem);

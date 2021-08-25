@@ -21,7 +21,7 @@
 
 #include <ntifs.h>
 
-#include "driverhelper\trace.h"
+#include "trace.h"
 #include "peer.h"
 #include "timer.h"
 #include "socket.h"
@@ -80,14 +80,28 @@ OvpnPeerNew(POVPN_DEVICE device, WDFREQUEST request)
     device->CryptoContext.AlgHandle = algHandle;
     device->Socket.Socket = socket;
     device->Socket.Tcp = proto_tcp;
+    device->Socket.TransportOverhead = proto_tcp ? 2 : 0;
     RtlZeroMemory(&device->Socket.TcpState, sizeof(OvpnSocketTcpState));
     ExReleaseSpinLockExclusive(&device->SpinLock, kirql);
 
     OvpnPeerZeroStats(&device->Stats);
 
+    LOG_INFO("Create pools and queues");
+
+    GOTO_IF_NOT_NT_SUCCESS(done, status, OvpnBufferPoolCreate(&device->TxPool, sizeof(OVPN_TX_WORKITEM), 1024));
+    GOTO_IF_NOT_NT_SUCCESS(done, status, OvpnBufferPoolCreate(&device->RxPool, sizeof(OVPN_RX_WORKITEM), 1024));
+
+    GOTO_IF_NOT_NT_SUCCESS(done, status, OvpnBufferQueueCreate(&device->RxDataQueue));
+    GOTO_IF_NOT_NT_SUCCESS(done, status, OvpnBufferQueueCreate(&device->RxControlQueue));
+
+
     if (proto_tcp) {
+        GOTO_IF_NOT_NT_SUCCESS(done, status, OvpnBufferPoolCreate(&device->TcpDataRxPool, OVPN_SOCKET_PACKET_BUFFER_SIZE, 1024));
+        GOTO_IF_NOT_NT_SUCCESS(done, status, OvpnBufferPoolCreate(&device->TcpDataTxPool, OVPN_SOCKET_PACKET_BUFFER_SIZE, 1024));
+
         // start async connect
-        status = OvpnSocketTcpConnect(socket, device, (PSOCKADDR)&peer->Remote);
+        LOG_IF_NOT_NT_SUCCESS(status = WdfRequestForwardToIoQueue(request, device->PendingNewPeerQueue));
+        LOG_IF_NOT_NT_SUCCESS(status = OvpnSocketTcpConnect(socket, device, (PSOCKADDR)&peer->Remote));
     }
 
 done:
@@ -224,6 +238,32 @@ OvpnPeerUninit(POVPN_DEVICE device)
     KIRQL kirql = ExAcquireSpinLockExclusive(&device->SpinLock);
 
     PWSK_SOCKET socket = device->Socket.Socket;
+
+    // do we have pending packets in queues ?
+    LOG_INFO("Flush queues");
+    LIST_ENTRY* entry = OvpnBufferQueueDequeue(device->RxControlQueue);
+    while (entry != NULL) {
+        OVPN_RX_WORKITEM* workItem = CONTAINING_RECORD(entry, OVPN_RX_WORKITEM, ListEntry);
+        OvpnBufferPoolPut(device->RxPool, workItem);
+        if ((device->Socket.Tcp) && (workItem->DUMMYUNION.TCP.DataIndication))
+            LOG_IF_NOT_NT_SUCCESS(((WSK_PROVIDER_CONNECTION_DISPATCH*)socket->Dispatch)->WskRelease(socket, (WSK_DATA_INDICATION*)workItem->DUMMYUNION.TCP.DataIndication));
+        else
+            LOG_IF_NOT_NT_SUCCESS(((WSK_PROVIDER_DATAGRAM_DISPATCH*)socket->Dispatch)->WskRelease(socket, (WSK_DATAGRAM_INDICATION*)workItem->DUMMYUNION.DatagramIndication));
+        entry = OvpnBufferQueueDequeue(device->RxControlQueue);
+    }
+
+    entry = OvpnBufferQueueDequeue(device->RxDataQueue);
+    while (entry != NULL) {
+        OVPN_RX_WORKITEM* workItem = CONTAINING_RECORD(entry, OVPN_RX_WORKITEM, ListEntry);
+        OvpnBufferPoolPut(device->RxPool, workItem);
+        if ((device->Socket.Tcp) && (workItem->DUMMYUNION.TCP.DataIndication))
+            LOG_IF_NOT_NT_SUCCESS(((WSK_PROVIDER_CONNECTION_DISPATCH*)socket->Dispatch)->WskRelease(socket, (WSK_DATA_INDICATION*)workItem->DUMMYUNION.TCP.DataIndication));
+        else
+            LOG_IF_NOT_NT_SUCCESS(((WSK_PROVIDER_DATAGRAM_DISPATCH*)socket->Dispatch)->WskRelease(socket, (WSK_DATAGRAM_INDICATION*)workItem->DUMMYUNION.DatagramIndication));
+        entry = OvpnBufferQueueDequeue(device->RxDataQueue);
+    }
+
+
     device->Socket.Socket = NULL;
 
     OvpnTimerDestroy(&device->KeepaliveXmitTimer);
@@ -240,7 +280,11 @@ OvpnPeerUninit(POVPN_DEVICE device)
 
     OvpnAdapterDestroy(device->Adapter);
 
-    // there might be buffers in consumer list, move them to producer list
-    // so that client won't get control channel messages from previous session
-    OvpnBufferQueueFlushPending(device->ControlRxBufferQueue);
+    LOG_INFO("Delete pools and queues");
+
+    OvpnBufferPoolDelete(device->RxPool);
+    OvpnBufferPoolDelete(device->TxPool);
+
+    OvpnBufferQueueDelete(device->RxControlQueue);
+    OvpnBufferQueueDelete(device->RxDataQueue);
 }

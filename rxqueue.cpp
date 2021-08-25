@@ -23,11 +23,12 @@
 #include <wdf.h>
 #include <netadaptercx.h>
 #include <net/virtualaddress.h>
+#include <net/returncontext.h>
 
 #include "driver.h"
-#include "driverhelper\buffers.h"
 #include "rxqueue.h"
 #include "netringiterator.h"
+#include "trace.h"
 
 EVT_PACKET_QUEUE_ADVANCE OvpnEvtRxQueueAdvance;
 
@@ -37,39 +38,44 @@ OvpnEvtRxQueueAdvance(NETPACKETQUEUE netPacketQueue)
 {
     POVPN_RXQUEUE queue = OvpnGetRxQueueContext(netPacketQueue);
     OVPN_DEVICE* device = OvpnGetDeviceContext(queue->Adapter->WdfDevice);
-    OVPN_BUFFER_QUEUE bufferQueue = device->DataRxBufferQueue;
 
     NET_RING_FRAGMENT_ITERATOR fi = NetRingGetAllFragments(queue->Rings);
     NET_RING_PACKET_ITERATOR pi = NetRingGetAllPackets(queue->Rings);
+
+    NET_FRAGMENT* fragment = NULL;
+    NET_FRAGMENT_RETURN_CONTEXT* returnCtx = NULL;
+
     while (NetFragmentIteratorHasAny(&fi)) {
-        OVPN_RX_BUFFER* buffer;
-
-        // nothing has arrived and decrypted yet?
-        if (!NT_SUCCESS(OvpnBufferQueueDequeue(bufferQueue, &buffer))) {
+        // get RX workitem, if any
+        LIST_ENTRY* entry = OvpnBufferQueueDequeue(device->RxDataQueue);
+        if (entry == NULL)
             break;
-        }
+        OVPN_RX_WORKITEM* workItem = CONTAINING_RECORD(entry, OVPN_RX_WORKITEM, ListEntry);
 
-        NET_FRAGMENT* fragment = NetFragmentIteratorGetFragment(&fi);
-        fragment->ValidLength = buffer->Len;
-        fragment->Offset = 0;
+        fragment = NetFragmentIteratorGetFragment(&fi);
+
+        fragment->ValidLength = workItem->Length;
+        fragment->Offset = workItem->Offset;
+        fragment->Capacity = fragment->ValidLength + workItem->Offset;
+
         NET_FRAGMENT_VIRTUAL_ADDRESS* virtualAddr = NetExtensionGetFragmentVirtualAddress(&queue->VirtualAddressExtension, NetFragmentIteratorGetIndex(&fi));
-        RtlCopyMemory(virtualAddr->VirtualAddress, buffer->Head, buffer->Len);
+        virtualAddr->VirtualAddress = (PUCHAR)MmGetSystemAddressForMdlSafe(workItem->Mdl, LowPagePriority | MdlMappingNoExecute);
 
-        InterlockedExchangeAddNoFence64(&device->Stats.TunBytesReceived, buffer->Len);
-
+        // TODO: handle case when packet (DataIndication) contains multiple fragments
         NET_PACKET* packet = NetPacketIteratorGetPacket(&pi);
         packet->FragmentIndex = NetFragmentIteratorGetIndex(&fi);
         packet->FragmentCount = 1;
 
         packet->Layout = {};
 
+        // NetAdapter will call ReturnRxBuffer callback when it is done with buffers, there we return RX workitem back to the pool
+        returnCtx = NetExtensionGetFragmentReturnContext(&queue->ReturnContextExtension, NetFragmentIteratorGetIndex(&fi));
+        returnCtx->Handle = (NET_FRAGMENT_RETURN_CONTEXT_HANDLE)workItem;
+
         NetFragmentIteratorAdvance(&fi);
         NetPacketIteratorAdvance(&pi);
-
-        OvpnBufferQueueReuse(bufferQueue, buffer);
-
-        InterlockedIncrementNoFence(&device->Stats.ReceivedDataPackets);
     }
+
     NetFragmentIteratorSet(&fi);
     NetPacketIteratorSet(&pi);
 }
@@ -110,7 +116,11 @@ OvpnRxQueueInitialize(NETPACKETQUEUE netPacketQueue, POVPN_ADAPTER adapter)
     queue->Adapter = adapter;
     queue->Rings = NetRxQueueGetRingCollection(netPacketQueue);
 
-    NET_EXTENSION_QUERY extension;
-    NET_EXTENSION_QUERY_INIT(&extension, NET_FRAGMENT_EXTENSION_VIRTUAL_ADDRESS_NAME, NET_FRAGMENT_EXTENSION_VIRTUAL_ADDRESS_VERSION_1, NetExtensionTypeFragment);
-    NetRxQueueGetExtension(netPacketQueue, &extension, &queue->VirtualAddressExtension);
+    NET_EXTENSION_QUERY vaExtension;
+    NET_EXTENSION_QUERY_INIT(&vaExtension, NET_FRAGMENT_EXTENSION_VIRTUAL_ADDRESS_NAME, NET_FRAGMENT_EXTENSION_VIRTUAL_ADDRESS_VERSION_1, NetExtensionTypeFragment);
+    NetRxQueueGetExtension(netPacketQueue, &vaExtension, &queue->VirtualAddressExtension);
+
+    NET_EXTENSION_QUERY returnCtxExtension;
+    NET_EXTENSION_QUERY_INIT(&returnCtxExtension, NET_FRAGMENT_EXTENSION_RETURN_CONTEXT_NAME, NET_FRAGMENT_EXTENSION_RETURN_CONTEXT_VERSION_1, NetExtensionTypeFragment);
+    NetRxQueueGetExtension(netPacketQueue, &returnCtxExtension, &queue->ReturnContextExtension);
 }

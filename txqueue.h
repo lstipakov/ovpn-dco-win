@@ -30,6 +30,7 @@ typedef struct _OVPN_TXQUEUE
     NET_RING_COLLECTION const * Rings;
 
     NET_EXTENSION VirtualAddressExtension;
+    NET_EXTENSION MdlExtension;
 } OVPN_TXQUEUE, * POVPN_TXQUEUE;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(OVPN_TXQUEUE, OvpnGetTxQueueContext);

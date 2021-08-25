@@ -216,9 +216,10 @@ private:
 	}
 
 	void tick_() {
-		//std::ostringstream os;
-		//os << "hello, world " << index_ ++;
-		//send_(os.str());
+		std::ostringstream os;
+		for (int i = 0; i < 1; ++ i)
+			os << "hello, world " << index_ ++;
+		send_(os.str());
 
 		OVPN_STATS stats;
 		DWORD bytes_returned;
@@ -227,6 +228,7 @@ private:
 			throw std::exception();
 		}
 
+		/*
 		std::cout << "lostInCtrlPkts: " << stats.LostInControlPackets <<
 			"\nlostInDataPkts: " << stats.LostInDataPackets <<
 			"\nlostOutCtrlPkts: " << stats.LostOutControlPackets <<
@@ -239,13 +241,12 @@ private:
 			"\ntransportBytesReceived: " << stats.TransportBytesReceived <<
 			"\ntunBytesSent: " << stats.TunBytesSent <<
 			"\ntunBytesReceived: " << stats.TunBytesReceived << "\n\n";
+		*/
 
 		timer_->expires_at(timer_->expires_at() + duration_);
 		timer_->async_wait([this](const asio::error_code& error) {
 			tick_();
 		});
-
-		send_("hello, world!");
 	};
 
 	void queue_read_() {
@@ -255,20 +256,26 @@ private:
 			}
 			else {
 				std::cerr << "error " << error << " reading" << std::endl;
+				//queue_read_();
 			}
 		});
 	}
 
 
 	void handle_read_(size_t len) {
-		//std::cout << "Received: " << buf << std::endl;
+		std::cout << "Received: " << buf << std::endl;
 		//send_(std::string(buf));
 
 		queue_read_();
 	}
 
 	void send_(const std::string& str) {
-		handle_->write_some(asio::buffer(str.c_str(), str.length()));
+		try {
+			handle_->write_some(asio::buffer(str.c_str(), str.length()));
+		}
+		catch (const asio::system_error& e) {
+			std::cerr << "Write error: " << e.what() << std::endl;
+		}
 	}
 
 	template <class C>
@@ -383,7 +390,7 @@ private:
 	std::unique_ptr<asio::steady_timer> timer_;
 	std::chrono::milliseconds duration_ = std::chrono::milliseconds(1000);
 
-	char buf[4096];
+	char buf[1400];
 	int index_ = 0;
 
 	static inline const wchar_t* ADAPTER_KEY = L"SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}";

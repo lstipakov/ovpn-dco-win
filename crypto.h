@@ -24,9 +24,22 @@
 #include <ntddk.h>
 #include <bcrypt.h>
 
-#include "driverhelper\buffers.h"
 #include "pktid.h"
 #include "uapi\ovpn-dco.h"
+
+#define AEAD_CRYPTO_OVERHEAD 24 // 4 + 4 + 16 data_v2 + pktid + auth_tag
+#define NONE_CRYPTO_OVERHEAD 8 // 4 + 4 data_v2 + pktid
+#define OVPN_PKTID_LEN 4
+#define OVPN_NONCE_TAIL_LEN 8
+#define OVPN_DATA_V2_LEN 4
+#define AEAD_AUTH_TAG_LEN 16
+#define AES_BLOCK_SIZE 16
+#define AES_GCM_NONCE_LEN 12
+
+ // packet opcode (high 5 bits) and key-id (low 3 bits) are combined in one byte
+#define OVPN_OP_DATA_V2 9
+#define OVPN_KEY_ID_MASK 0x07
+#define OVPN_OPCODE_SHIFT 3
 
 struct OvpnCryptoKeySlot
 {
@@ -48,7 +61,7 @@ _IRQL_requires_max_(DISPATCH_LEVEL)
 _Must_inspect_result_
 typedef
 NTSTATUS
-OVPN_CRYPTO_ENCRYPT(_In_ OvpnCryptoKeySlot* keySlot, _Inout_ OVPN_TX_BUFFER* buffer);
+OVPN_CRYPTO_ENCRYPT(_In_ OvpnCryptoKeySlot* keySlot, _In_ PMDL mdl, _In_ SIZE_T len, _In_ SIZE_T offset);
 typedef OVPN_CRYPTO_ENCRYPT* POVPN_CRYPTO_ENCRYPT;
 
 _Function_class_(OVPN_CRYPTO_DECRYPT)
@@ -56,8 +69,7 @@ _IRQL_requires_max_(DISPATCH_LEVEL)
 _Must_inspect_result_
 typedef
 NTSTATUS
-OVPN_CRYPTO_DECRYPT(_In_ OvpnCryptoKeySlot* keySlot, _In_reads_(cipherTextSize) UCHAR* cipherTextBuffer,
-    _Out_writes_(plainTextBufferMaxSize) UCHAR* plainTextBuffer, SIZE_T cipherTextSize, SIZE_T plainTextBufferMaxSize, _Out_ SIZE_T* plainTextBufferFinalSize);
+OVPN_CRYPTO_DECRYPT(_In_ OvpnCryptoKeySlot* keySlot, _In_ PMDL mdl, _In_ SIZE_T len, _In_ SIZE_T offset);
 typedef OVPN_CRYPTO_DECRYPT* POVPN_CRYPTO_DECRYPT;
 
 struct OvpnCryptoContext
@@ -69,6 +81,8 @@ struct OvpnCryptoContext
 
     POVPN_CRYPTO_ENCRYPT Encrypt;
     POVPN_CRYPTO_DECRYPT Decrypt;
+
+    SIZE_T CryptoOverhead;
 };
 
 _Must_inspect_result_
@@ -89,3 +103,16 @@ OvpnCryptoKeySlotFromKeyId(_In_ OvpnCryptoContext* cryptoContext, unsigned int k
 
 VOID
 OvpnCryptoSwapKeys(_In_ OvpnCryptoContext* cryptoContext);
+
+static inline
+UINT
+OvpnCryptoKeyIdExtract(UINT op)
+{
+    return op & OVPN_KEY_ID_MASK;
+}
+
+static inline
+UINT OvpnCryptoOpcodeExtract(UINT op)
+{
+    return op >> OVPN_OPCODE_SHIFT;
+}

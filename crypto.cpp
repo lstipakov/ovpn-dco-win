@@ -22,28 +22,39 @@
 #include <ntddk.h>
 #include <bcrypt.h>
 
-#include "driverhelper\buffers.h"
+#include "adapter.h"
 #include "crypto.h"
-#include "driverhelper\trace.h"
+#include "trace.h"
 #include "pktid.h"
-#include "proto.h"
 
 OVPN_CRYPTO_DECRYPT OvpnCryptoDecryptNone;
 
+static
+UINT
+OvpnCryptoOpCompose(UINT opcode, UINT keyId)
+{
+    return (opcode << OVPN_OPCODE_SHIFT) | keyId;
+}
+
+static
+UINT
+OvpnProtoOp32Compose(UINT opcode, UINT keyId, UINT opPeerId)
+{
+    UINT op8 = OvpnCryptoOpCompose(opcode, keyId);
+
+    if (opcode == OVPN_OP_DATA_V2)
+        return (op8 << 24) | (opPeerId & 0x00FFFFFF);
+
+    return op8;
+}
+
 _Use_decl_annotations_
-NTSTATUS OvpnCryptoDecryptNone(OvpnCryptoKeySlot* keySlot, UCHAR* cipherTextBuffer, UCHAR* plainTextBuffer,
-    SIZE_T cipherTextSize, SIZE_T plainTextBufferMaxSize, SIZE_T* plainTextBufferFinalSize)
+NTSTATUS OvpnCryptoDecryptNone(OvpnCryptoKeySlot* keySlot, PMDL mdl, SIZE_T len, SIZE_T offset)
 {
     UNREFERENCED_PARAMETER(keySlot);
-    UNREFERENCED_PARAMETER(plainTextBufferMaxSize);
-
-    /* OP header size + Packet ID */
-    constexpr int payloadOffset = OVPN_OP_SIZE_V2 + 4;
-
-    RtlCopyMemory(plainTextBuffer, cipherTextBuffer +
-        payloadOffset, cipherTextSize - payloadOffset);
-
-    *plainTextBufferFinalSize = cipherTextSize - payloadOffset;
+    UNREFERENCED_PARAMETER(mdl);
+    UNREFERENCED_PARAMETER(len);
+    UNREFERENCED_PARAMETER(offset);
 
     return STATUS_SUCCESS;
 }
@@ -52,21 +63,20 @@ OVPN_CRYPTO_ENCRYPT OvpnCryptoEncryptNone;
 
 _Use_decl_annotations_
 NTSTATUS
-OvpnCryptoEncryptNone(OvpnCryptoKeySlot* keySlot, OVPN_TX_BUFFER* buffer)
+OvpnCryptoEncryptNone(OvpnCryptoKeySlot* keySlot, PMDL mdl, SIZE_T len, SIZE_T offset)
 {
     UNREFERENCED_PARAMETER(keySlot);
-
-    // prepend with pktid
-    PUCHAR buf = OvpnTxBufferPush(buffer, 4);
-    static ULONG pktid;
-    ULONG pktidNetwork = RtlUlongByteSwap(pktid++);
-    RtlCopyMemory(buf, &pktidNetwork, 4);
+    UNREFERENCED_PARAMETER(len);
 
     // prepend with opcode, key-id and peer-id
-    ULONG op = OvpnProtoOp32Compose(OVPN_DATA_V2, 0, -1);
+    UINT32 op = OvpnProtoOp32Compose(OVPN_OP_DATA_V2, 0, 0);
     op = RtlUlongByteSwap(op);
-    buf = OvpnTxBufferPush(buffer, OVPN_OP_SIZE_V2);
-    RtlCopyMemory(buf, &op, OVPN_OP_SIZE_V2);
+    *(UINT32*)((UCHAR*)MmGetMdlVirtualAddress(mdl) + offset) = op;
+
+    // prepend with pktid
+    static ULONG pktid;
+    ULONG pktidNetwork = RtlUlongByteSwap(pktid++);
+    *(UINT32*)((UCHAR*)MmGetMdlVirtualAddress(mdl) + offset + OVPN_DATA_V2_LEN) = pktidNetwork;
 
     return STATUS_SUCCESS;
 }
@@ -85,120 +95,275 @@ done:
 
 OVPN_CRYPTO_DECRYPT OvpnCryptoDecryptAEAD;
 
-_Use_decl_annotations_
-NTSTATUS
-OvpnCryptoDecryptAEAD(OvpnCryptoKeySlot* keySlot, UCHAR* cipherTextBuffer, UCHAR* plainTextBuffer,
-    SIZE_T cipherTextSize, SIZE_T plainTextBufferMaxSize, SIZE_T* plainTextBufferFinalSize)
+struct WorkingBuf
 {
-    // prepare nonce, which is 4 bytes pktid + 8 bytes nonce_tail
-    UCHAR nonce[12];
-    RtlCopyMemory(nonce, cipherTextBuffer + OVPN_OP_SIZE_V2, 4);
-    RtlCopyMemory(nonce + 4, &keySlot->DecNonceTail, sizeof(keySlot->DecNonceTail));
+    struct Chunk
+    {
+        PUCHAR Buf;
+        ULONG Len;
+    } Chunks[16];
+    ULONG ChunksNum;
+
+    ULONG Len;
+    UCHAR Buf[16];
+};
+
+static VOID
+OvpnCryptoAddChunk(WorkingBuf* workingBuf, ULONG chunkLen, UCHAR* buf)
+{
+    // add chunk data to working buf
+    RtlCopyMemory((PVOID)(workingBuf->Buf + workingBuf->Len), (PVOID)buf, chunkLen);
+
+    // update working buf chunks
+    WorkingBuf::Chunk* chunk = &workingBuf->Chunks[workingBuf->ChunksNum];
+    chunk->Len = chunkLen;
+    chunk->Buf = buf;
+    ++workingBuf->ChunksNum;
+
+    // update working buf length
+    workingBuf->Len += chunkLen;
+}
+
+static NTSTATUS
+EncryptDecryptWorkingBuf(BOOLEAN encrypt, WorkingBuf* workingBuf, BCRYPT_KEY_HANDLE encKey, PBCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo, UCHAR* nonce)
+{
+    NTSTATUS status = STATUS_SUCCESS;
+
+    // encrypt working buf
+    ULONG bytesDone = 0;
+    GOTO_IF_NOT_NT_SUCCESS(done, status, encrypt ?
+        BCryptEncrypt(encKey, workingBuf->Buf, workingBuf->Len, authInfo, nonce, AES_GCM_NONCE_LEN, workingBuf->Buf, workingBuf->Len, &bytesDone, 0) :
+        BCryptDecrypt(encKey, workingBuf->Buf, workingBuf->Len, authInfo, nonce, AES_GCM_NONCE_LEN, workingBuf->Buf, workingBuf->Len, &bytesDone, 0));
+
+    ULONG count = 0;
+    // copy ciphertext back to corresponding MDLs
+    for (ULONG i = 0; i < workingBuf->ChunksNum; ++i) {
+        WorkingBuf::Chunk* chunk = &workingBuf->Chunks[i];
+        RtlCopyMemory(chunk->Buf, workingBuf->Buf + count, chunk->Len);
+        count += chunk->Len;
+    }
+
+    // clear working buffer
+    workingBuf->Len = 0;
+    workingBuf->ChunksNum = 0;
+
+done:
+    return status;
+}
+
+static NTSTATUS
+OvpnCryptoEncryptDecryptMdl(BOOLEAN encrypt, PUCHAR buf, ULONG len, WorkingBuf* workingBuf, BCRYPT_KEY_HANDLE encKey, PBCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo, UCHAR* nonce, BOOLEAN last)
+{
+    NTSTATUS status = STATUS_SUCCESS;
+
+    // try to fill working buf
+    if (workingBuf->Len > 0) {
+        ULONG workingBufCapacity = AES_BLOCK_SIZE - workingBuf->Len;
+        BOOLEAN workingBufWillBeFull = len >= workingBufCapacity;
+        ULONG chunkLen = workingBufWillBeFull ? workingBufCapacity : len;
+
+        OvpnCryptoAddChunk(workingBuf, chunkLen, buf);
+
+        len -= chunkLen;
+        buf += chunkLen;
+
+        // if the whole MDL will be encrypted as part of working buf and
+        // this is the last MDL, remove CHAIN flag
+        if (len == 0 && last)
+            authInfo->dwFlags &= ~BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
+
+        if (workingBufWillBeFull || ((len == 0) && last))
+            GOTO_IF_NOT_NT_SUCCESS(done, status, EncryptDecryptWorkingBuf(encrypt, workingBuf, encKey, authInfo, nonce));
+
+        if (len == 0) {
+            goto done;
+        }
+    }
+
+    // encrypt (part of) MDL
+
+    if (last)
+        authInfo->dwFlags &= ~BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
+
+    ULONG bufLenToEncrypt = (len / AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
+    if ((bufLenToEncrypt == len) || last) {
+        // MDL len is multiple of AES_BLOCK_SIZE or this is the last MDL, no need to use working buf
+        ULONG bytesDone = 0;
+        status = encrypt ? BCryptEncrypt(encKey, buf, len, authInfo, nonce, AES_GCM_NONCE_LEN, buf, len, &bytesDone, 0) :
+            BCryptDecrypt(encKey, buf, len, authInfo, nonce, AES_GCM_NONCE_LEN, buf, len, &bytesDone, 0);
+        GOTO_IF_NOT_NT_SUCCESS(done, status, status);
+    }
+    else {
+        // partially encrypt MDL, copy rest into working buf
+        ULONG bytesDone = 0;
+        status = encrypt ? BCryptEncrypt(encKey, buf, bufLenToEncrypt, authInfo, nonce, AES_GCM_NONCE_LEN, buf, bufLenToEncrypt, &bytesDone, 0) :
+            BCryptDecrypt(encKey, buf, bufLenToEncrypt, authInfo, nonce, AES_GCM_NONCE_LEN, buf, bufLenToEncrypt, &bytesDone, 0);
+        GOTO_IF_NOT_NT_SUCCESS(done, status, status);
+        buf += bufLenToEncrypt;
+
+        OvpnCryptoAddChunk(workingBuf, len - bufLenToEncrypt, buf);
+    }
+
+done:
+    if (status != STATUS_SUCCESS) {
+        workingBuf->Len = 0;
+        workingBuf->ChunksNum = 0;
+    }
+
+    return status;
+}
+
+#define GET_SYSTEM_ADDRESS_MDL(buf, mdl) { \
+    buf = (PUCHAR)MmGetSystemAddressForMdlSafe(mdl, LowPagePriority | MdlMappingNoExecute); \
+    if (buf == NULL) { \
+        LOG_ERROR("MmGetSystemAddressForMdlSafe() returned NULL"); \
+        return STATUS_DATA_ERROR; \
+    } \
+}
+
+static
+NTSTATUS
+OvpnCryptoAEADDoWork(BOOLEAN encrypt, OvpnCryptoKeySlot* keySlot, PMDL mdl, SIZE_T len, SIZE_T offset)
+{
+    /*
+    AEAD Nonce :
+
+     [Packet ID] [HMAC keying material]
+     [4 bytes  ] [8 bytes             ]
+     [AEAD nonce total : 12 bytes     ]
+
+    TLS wire protocol :
+
+     [DATA_V2 opcode] [Packet ID] [AEAD Auth tag] [ciphertext]
+     [4 bytes       ] [4 bytes  ] [16 bytes     ]
+     [AEAD additional data(AD)  ]
+    */
+
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (len < AEAD_CRYPTO_OVERHEAD) {
+        LOG_WARN("Packet too short", TraceLoggingValue(len, "len"));
+        return STATUS_DATA_ERROR;
+    }
+
+    PUCHAR buf;
+    GET_SYSTEM_ADDRESS_MDL(buf, mdl);
+
+    buf += offset;
+
+    UCHAR nonce[OVPN_PKTID_LEN + OVPN_NONCE_TAIL_LEN];
+    if (encrypt) {
+        // prepend with opcode, key-id and peer-id
+        UINT32 op = OvpnProtoOp32Compose(OVPN_OP_DATA_V2, keySlot->KeyId, keySlot->PeerId);
+        op = RtlUlongByteSwap(op);
+        *(UINT32*)(buf) = op;
+
+        // calculate pktid
+        UINT32 pktid;
+        GOTO_IF_NOT_NT_SUCCESS(done, status, OvpnPktidXmitNext(&keySlot->PktidXmit, &pktid));
+        ULONG pktidNetwork = RtlUlongByteSwap(pktid);
+
+        // calculate nonce, which is pktid + nonce_tail
+        RtlCopyMemory(nonce, &pktidNetwork, OVPN_PKTID_LEN);
+        RtlCopyMemory(nonce + OVPN_PKTID_LEN, keySlot->EncNonceTail, OVPN_NONCE_TAIL_LEN);
+
+        // prepend with pktid
+        *(UINT32*)(buf + OVPN_DATA_V2_LEN) = pktidNetwork;
+    }
+    else {
+        RtlCopyMemory(nonce, buf + OVPN_DATA_V2_LEN, OVPN_PKTID_LEN);
+        RtlCopyMemory(nonce + OVPN_PKTID_LEN, &keySlot->DecNonceTail, sizeof(keySlot->DecNonceTail));
+
+        // TODO: verify pktid
+    }
 
     BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
     BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
     authInfo.pbNonce = nonce;
     authInfo.cbNonce = sizeof(nonce);
-    authInfo.pbTag = cipherTextBuffer + OVPN_OP_SIZE_V2 + 4;
-    authInfo.cbTag = 16;
-    authInfo.pbAuthData = cipherTextBuffer;
-    authInfo.cbAuthData = OVPN_OP_SIZE_V2 + 4;
+    authInfo.pbTag = buf + OVPN_DATA_V2_LEN + OVPN_PKTID_LEN;
+    authInfo.cbTag = AEAD_AUTH_TAG_LEN;
+    authInfo.pbAuthData = buf;
+    authInfo.cbAuthData = OVPN_DATA_V2_LEN + OVPN_PKTID_LEN;
 
-    constexpr int payloadOffset = OVPN_OP_SIZE_V2 + 4 + 16; // op + pktid + auth_tag
+    buf += AEAD_CRYPTO_OVERHEAD;
 
-    ULONG bytesDone = 0;
-    NTSTATUS status;
-    LOG_IF_NOT_NT_SUCCESS(status = BCryptDecrypt(keySlot->DecKey, cipherTextBuffer + payloadOffset, (ULONG)cipherTextSize - payloadOffset, &authInfo, NULL, 0,
-        plainTextBuffer, (ULONG)plainTextBufferMaxSize, &bytesDone, 0));
+    len -= AEAD_CRYPTO_OVERHEAD;
 
-    if (!NT_SUCCESS(status)) {
-        *plainTextBufferFinalSize = 0;
-    } else {
-        UINT32 pktId = RtlUlongByteSwap(*(UINT32*)nonce);
-        status = OvpnPktidRecvVerify(&keySlot->PktidRecv, pktId);
+    if ((mdl->Next == NULL) || (!encrypt)) {
+        // TODO: while on RX path packets seem to come in one fragment/MDL
+        // and chaining decryption is not needed, figure out why on some machines (like AWS)
+        // TCP performance drops dramatically when chaining decryption is used.
 
-        if (NT_SUCCESS(status)) {
-            *plainTextBufferFinalSize = bytesDone;
+        if ((len + AEAD_CRYPTO_OVERHEAD) > MmGetMdlByteCount(mdl)) {
+            LOG_WARN("Length exceeds MDL length", TraceLoggingValue(len + AEAD_CRYPTO_OVERHEAD, "len"), TraceLoggingValue(MmGetMdlByteCount(mdl), "mdlByteCount"));
+            status = STATUS_BAD_DATA;
+            goto done;
         }
-        else {
-            *plainTextBufferFinalSize = 0;
-            LOG_ERROR("Invalid pktId", TraceLoggingUInt32(pktId, "pktId"));
+
+        // non-chaining mode
+        ULONG bytesDone = 0;
+        GOTO_IF_NOT_NT_SUCCESS(done, status, encrypt ?
+            BCryptEncrypt(keySlot->EncKey, buf, (ULONG)len, &authInfo, NULL, 0, buf, (ULONG)len, &bytesDone, 0) :
+            BCryptDecrypt(keySlot->DecKey, buf, (ULONG)len, &authInfo, NULL, 0, buf, (ULONG)len, &bytesDone, 0)
+        );
+    }
+    else {
+        UCHAR macContext[16];
+
+        authInfo.pbMacContext = macContext;
+        authInfo.cbMacContext = AEAD_AUTH_TAG_LEN;
+        authInfo.dwFlags = BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
+
+        WorkingBuf workingBuf;
+        workingBuf.Len = 0;
+        workingBuf.ChunksNum = 0;
+
+        int mdlCount = 0;
+
+        BOOLEAN firstMdl = TRUE;
+        while (mdl != NULL) {
+            ULONG mdlLen = MmGetMdlByteCount(mdl);
+            if (firstMdl) {
+                mdlLen -= AEAD_CRYPTO_OVERHEAD; // account for crypto overhead/openvpn wrapping
+                mdlLen -= (ULONG)offset;
+            }
+            firstMdl = FALSE;
+
+            ++mdlCount;
+
+            BOOLEAN last = (mdl->Next == NULL) || (len == 0);
+            ULONG bytesToCrypt = min((ULONG)len, mdlLen);
+            OvpnCryptoEncryptDecryptMdl(encrypt, buf, bytesToCrypt, &workingBuf,
+                encrypt ? keySlot->EncKey : keySlot->DecKey, &authInfo, nonce, last);
+
+            len -= bytesToCrypt;
+
+            mdl = len > 0 ? mdl->Next : NULL;
+
+            if (mdl)
+                GET_SYSTEM_ADDRESS_MDL(buf, mdl);
         }
     }
 
+done:
     return status;
+}
+
+_Use_decl_annotations_
+NTSTATUS
+OvpnCryptoDecryptAEAD(OvpnCryptoKeySlot* keySlot, PMDL mdl, SIZE_T len, SIZE_T offset)
+{
+    return OvpnCryptoAEADDoWork(FALSE, keySlot, mdl, len, offset);
 }
 
 OVPN_CRYPTO_ENCRYPT OvpnCryptoEncryptAEAD;
 
 _Use_decl_annotations_
 NTSTATUS
-OvpnCryptoEncryptAEAD(OvpnCryptoKeySlot* keySlot, OVPN_TX_BUFFER* buffer)
+OvpnCryptoEncryptAEAD(OvpnCryptoKeySlot* keySlot, PMDL mdl, SIZE_T len, SIZE_T offset)
 {
-    /*
-    AEAD Nonce :
-
-         [Packet ID] [HMAC keying material]
-         [4 bytes  ] [8 bytes             ]
-         [AEAD nonce total : 12 bytes     ]
-
-    TLS wire protocol :
-
-         [DATA_V2 opcode] [Packet ID] [AEAD Auth tag] [ciphertext]
-         [4 bytes       ] [4 bytes  ] [16 bytes     ]
-         [AEAD additional data(AD)  ]
-    */
-
-    SIZE_T plainTextLen = buffer->Len;
-
-    // prepend with auth_tag
-    PUCHAR tag = OvpnTxBufferPush(buffer, 16);
-
-    // calculate pktid
-    UINT32 pktid;
-    NTSTATUS status = OvpnPktidXmitNext(&keySlot->PktidXmit, &pktid);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-    ULONG pktidNetwork = RtlUlongByteSwap(pktid);
-
-    // calculate nonce, which is 4 bytes pktid + 8 bytes nonce_tail
-    UCHAR nonce[12];
-    RtlCopyMemory(nonce, &pktidNetwork, 4);
-    RtlCopyMemory(nonce + 4, keySlot->EncNonceTail, sizeof(keySlot->EncNonceTail));
-
-    // prepend with pktid
-    PUCHAR buf = OvpnTxBufferPush(buffer, 4);
-    RtlCopyMemory(buf, &pktidNetwork, 4);
-
-    // prepend with opcode, key-id and peer-id
-    ULONG op = OvpnProtoOp32Compose(OVPN_DATA_V2, keySlot->KeyId, keySlot->PeerId);
-    op = RtlUlongByteSwap(op);
-    buf = OvpnTxBufferPush(buffer, OVPN_OP_SIZE_V2);
-    RtlCopyMemory(buf, &op, OVPN_OP_SIZE_V2);
-
-    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
-    BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
-    authInfo.pbNonce = nonce;
-    authInfo.cbNonce = sizeof(nonce);
-    authInfo.pbTag = tag;
-    authInfo.cbTag = 16;
-    authInfo.pbAuthData = buffer->Data;
-    authInfo.cbAuthData = OVPN_OP_SIZE_V2 + 4;
-
-    constexpr int payloadOffset = OVPN_OP_SIZE_V2 + 4 + 16;
-
-    ULONG bytesDone = 0;
-    LOG_IF_NOT_NT_SUCCESS(status = BCryptEncrypt(keySlot->EncKey, buffer->Data + payloadOffset, (ULONG)plainTextLen, &authInfo, NULL, 0, buffer->Data + payloadOffset,
-        OVPN_BUFFER_CAPACITY, &bytesDone, 0));
-    if (!NT_SUCCESS(status)) {
-        buffer->Len = 0;
-    }
-    else {
-        buffer->Len = payloadOffset + (SIZE_T)bytesDone; // op + pktid + auth_tag + ciphertext
-    }
-
-    return status;
+    return OvpnCryptoAEADDoWork(TRUE, keySlot, mdl, len, offset);
 }
 
 _Use_decl_annotations_
@@ -245,11 +410,15 @@ OvpnCryptoNewKey(OvpnCryptoContext* cryptoContext, POVPN_CRYPTO_DATA cryptoData)
         keySlot->KeyId = cryptoData->KeyId;
         keySlot->PeerId = cryptoData->PeerId;
 
+        cryptoContext->CryptoOverhead = AEAD_CRYPTO_OVERHEAD;
+
         LOG_INFO("Key installed", TraceLoggingValue(cryptoData->KeyId, "KeyId"), TraceLoggingValue(cryptoData->KeyId, "PeerId"));
     }
     else if (cryptoData->CipherAlg == OVPN_CIPHER_ALG_NONE) {
         cryptoContext->Encrypt = OvpnCryptoEncryptNone;
         cryptoContext->Decrypt = OvpnCryptoDecryptNone;
+
+        cryptoContext->CryptoOverhead = NONE_CRYPTO_OVERHEAD;
 
         LOG_INFO("Using cipher none");
     }
@@ -269,7 +438,7 @@ done:
 
 _Use_decl_annotations_
 OvpnCryptoKeySlot*
-OvpnCryptoKeySlotFromKeyId(OvpnCryptoContext* cryptoContext, unsigned int keyId)
+OvpnCryptoKeySlotFromKeyId(OvpnCryptoContext* cryptoContext, UINT keyId)
 {
     if (cryptoContext->Primary.KeyId == keyId)
         return &cryptoContext->Primary;

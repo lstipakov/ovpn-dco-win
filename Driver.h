@@ -29,9 +29,10 @@
 #include <wsk.h>
 
 #include "adapter.h"
-#include "driverhelper\buffers.h"
+#include "bufferpool.h"
 #include "crypto.h"
 #include "socket.h"
+#include "timer.h"
 #include "uapi\ovpn-dco.h"
 
 extern "C" {
@@ -62,16 +63,25 @@ struct OVPN_DEVICE {
     // NEW_PEER request may be enqueued here if TCP connect doesn't finish immediatelly
     WDFQUEUE PendingNewPeerQueue;
 
-    // buffer queue for received decrypted data channel packets
-    OVPN_BUFFER_QUEUE DataRxBufferQueue;
-
-    // buffer queue for received control channel packets
-    OVPN_BUFFER_QUEUE ControlRxBufferQueue;
-
-    // buffer pool for encrypted data channel and control channel packets to be sent
+    // pool for OVPN_TX_WORKITEM entries
     OVPN_BUFFER_POOL TxPool;
 
+    // pool for OVPN_RX_WORKITEM entries
+    OVPN_BUFFER_POOL RxPool;
+
+    OVPN_BUFFER_POOL TcpDataRxPool;
+
+    OVPN_BUFFER_POOL TcpDataTxPool;
+
+    // data channel packets
+    OVPN_BUFFER_QUEUE RxDataQueue;
+
+    // control channel packets
+    OVPN_BUFFER_QUEUE RxControlQueue;
+
     OVPN_STATS Stats;
+
+    UCHAR KeepaliveXmitBuffer[OVPN_PAYLOAD_BACKFILL + OVPN_KEEPALIVE_MESSAGE_SIZE];
 
     // keepalive interval in seconds
     _Guarded_by_(SpinLock)

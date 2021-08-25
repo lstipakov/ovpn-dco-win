@@ -19,43 +19,58 @@
  *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
-#include "driverhelper\buffers.h"
 #include "driver.h"
-#include "driverhelper\trace.h"
+#include "trace.h"
 #include "timer.h"
 #include "socket.h"
 
-static const UCHAR OvpnKeepaliveMessage[] = {
+const UCHAR OvpnKeepaliveMessage[OVPN_KEEPALIVE_MESSAGE_SIZE] = {
     0x2a, 0x18, 0x7b, 0xf3, 0x64, 0x1e, 0xb4, 0xcb,
     0x07, 0xed, 0x2d, 0x0a, 0x98, 0x1f, 0xc7, 0x48
 };
 
 _Use_decl_annotations_
-BOOLEAN OvpnTimerIsKeepaliveMessage(const PUCHAR buf, SIZE_T len)
+BOOLEAN
+OvpnTimerIsKeepaliveMessage(MDL* mdl, SIZE_T length, SIZE_T offset)
 {
-    return RtlCompareMemory(buf, OvpnKeepaliveMessage, len) == sizeof(OvpnKeepaliveMessage);
+    PUCHAR buf = (PUCHAR)MmGetSystemAddressForMdlSafe(mdl, LowPagePriority | MdlMappingNoExecute);
+    if (buf == NULL) {
+        LOG_ERROR("MmGetSystemAddressForMdlSafe() returned NULL");
+        return FALSE;
+    }
+
+    buf += offset;
+
+    return RtlCompareMemory(buf, OvpnKeepaliveMessage, length) == sizeof(OvpnKeepaliveMessage);
 }
 
 _Function_class_(EVT_WDF_TIMER)
 static VOID OvpnTimerXmit(WDFTIMER timer)
 {
     POVPN_DEVICE device = OvpnGetDeviceContext(WdfTimerGetParentObject(timer));
-    OVPN_TX_BUFFER* buffer;
     NTSTATUS status;
 
-    LOG_IF_NOT_NT_SUCCESS(status = OvpnTxBufferPoolGet(device->TxPool, &buffer));
-
-    if (!NT_SUCCESS(status)) {
+    OVPN_TX_WORKITEM* workItem = (OVPN_TX_WORKITEM*)OvpnBufferPoolGet(device->TxPool);
+    if (workItem == NULL) {
+        LOG_WARN("TxPool exhausted, cannot send keepalive");
         return;
     }
 
-    // copy keepalive magic message to the buffer
-    RtlCopyMemory(OvpnTxBufferPut(buffer, sizeof(OvpnKeepaliveMessage)), OvpnKeepaliveMessage, sizeof(OvpnKeepaliveMessage));
+    workItem->Pool = device->TxPool;
+
+    // allocate MDL from keepalive buffer
+    PMDL mdl = IoAllocateMdl(device->KeepaliveXmitBuffer, sizeof(device->KeepaliveXmitBuffer), FALSE, FALSE, NULL);
+    MmBuildMdlForNonPagedPool(mdl);
+
+    // copy keepalive magic into buffer, minding payload backfill, which will be filled by encryption
+    RtlCopyMemory(device->KeepaliveXmitBuffer + OVPN_PAYLOAD_BACKFILL, OvpnKeepaliveMessage, sizeof(OvpnKeepaliveMessage));
+
+    SIZE_T offsetToCryptoHeader = OVPN_PAYLOAD_BACKFILL - device->CryptoContext.CryptoOverhead;
 
     KIRQL kiqrl = ExAcquireSpinLockShared(&device->SpinLock);
     if (device->CryptoContext.Encrypt) {
         // in-place encrypt, always with primary key
-        status = device->CryptoContext.Encrypt(&device->CryptoContext.Primary, buffer);
+        status = device->CryptoContext.Encrypt(&device->CryptoContext.Primary, mdl, sizeof(device->KeepaliveXmitBuffer) - offsetToCryptoHeader, offsetToCryptoHeader);
     }
     else {
         status = STATUS_INVALID_DEVICE_STATE;
@@ -63,20 +78,19 @@ static VOID OvpnTimerXmit(WDFTIMER timer)
     }
 
     if (NT_SUCCESS(status)) {
-        // start async send, completion handler will return ciphertext buffer to the pool
-        BOOLEAN wskSendCalled = FALSE;
-        LOG_IF_NOT_NT_SUCCESS(status = OvpnSocketSendTxBuffer(&device->Socket, buffer, &wskSendCalled));
-        if (!NT_SUCCESS(status)) {
-            if (!wskSendCalled) {
-                OvpnTxBufferPoolPut(buffer);
-            }
-        }
-        else {
+        // this will make send completion callback free MDL
+        workItem->Mdl = mdl;
+        SIZE_T offsetToTransportOverhead = offsetToCryptoHeader - device->Socket.TransportOverhead;
+        LOG_IF_NOT_NT_SUCCESS(OvpnSocketSend(&device->Socket, mdl,
+            offsetToTransportOverhead,
+            sizeof(device->KeepaliveXmitBuffer) - offsetToTransportOverhead, workItem));
+
+        if (NT_SUCCESS(status))
             LOG_INFO("Ping sent");
-        }
     }
     else {
-        OvpnTxBufferPoolPut(buffer);
+        // since we haven't called send, we must free MDL here
+        IoFreeMdl(mdl);
     }
     ExReleaseSpinLockShared(&device->SpinLock, kiqrl);
 }
@@ -153,8 +167,5 @@ VOID OvpnTimerReset(WDFTIMER timer, ULONG dueTime)
     if (timer != WDF_NO_HANDLE) {
         // if timer has already been created this will reset "due time" value to the new one
         WdfTimerStart(timer, WDF_REL_TIMEOUT_IN_SEC(dueTime));
-    }
-    else {
-        LOG_ERROR("Timer not initialized");
     }
 }
