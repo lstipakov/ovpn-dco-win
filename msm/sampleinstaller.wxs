@@ -15,6 +15,7 @@
             <Directory Id="$(var.PROGRAM_FILES_DIR)">
                 <Merge Id="OvpnDcoMergeModule" Language="0" DiskId="1" SourceFile="ovpn-dco-$(var.PRODUCT_PLATFORM).msm">
                     <ConfigurationData Name="NETADAPTERCX21_Property" Value="[NETADAPTERCX21]" />
+                    <ConfigurationData Name="WIN102004_Property" Value="[WIN102004]" />
                 </Merge>
             </Directory>
         </Directory>

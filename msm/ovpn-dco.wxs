@@ -4,17 +4,23 @@
         <Package Id="1057B5BE-89F7-469C-A3FD-D6662CD1D229" Description="OvpnDco merge module" Manufacturer="OpenVPN, Inc" InstallerVersion="500"/>
 
         <!--
-            magic below is to get NETADAPTERCX21 from MSI to merge module as property
+            magic below is to get WIN102004 and NETADAPTERCX21 from MSI to merge module as property
             see https://wyrdfish.wordpress.com/2011/01/05/configurable-merge-modules/
 
             defining property here just doesn't work
         -->
         <Configuration Name="NETADAPTERCX21_Property" Format="Text" NonNullable="yes" DefaultValue="defaultValue" />
+        <Configuration Name="WIN102004_Property" Format="Text" NonNullable="yes" DefaultValue="defaultValue" />
+
         <Property Id="NETADAPTERCX21" Value="unset"/>
+        <Property Id="WIN102004" Value="unset"/>
         <Substitution Table="CustomAction" Row="setnetadapter" Column="Target" Value="[=NETADAPTERCX21_Property]" />
+        <Substitution Table="CustomAction" Row="setwin102004" Column="Target" Value="[=WIN102004_Property]" />
         <CustomAction Property="NETADAPTERCX21" Value="[NETADAPTERCX21]" Id="setnetadapter" Execute="immediate" />
+        <CustomAction Property="WIN102004" Value="[WIN102004]" Id="setwin102004" Execute="immediate" />
         <InstallExecuteSequence>
             <Custom Action="setnetadapter" After="LaunchConditions" />
+            <Custom Action="setwin102004" After="LaunchConditions" />
         </InstallExecuteSequence>
 
         <SetProperty Action="SetOvpnDcoWin10" Id="OVPNDCO" After="CostFinalize" Value="[OVPNDCOPARENT]Win10\" Sequence="execute"><![CDATA[NOT NETADAPTERCX21]]></SetProperty>
@@ -66,8 +72,8 @@
         <CustomAction Id="OvpnDco_Evaluate" SuppressModularization="yes" BinaryKey="installer.dll" DllEntry="MsiEvaluate" Execute="immediate" />
         <CustomAction Id="OvpnDco_Process" SuppressModularization="yes" BinaryKey="installer.dll" DllEntry="MsiProcess" Execute="deferred" Impersonate="no" />
         <InstallExecuteSequence>
-            <Custom Action="OvpnDco_Evaluate" Before="OvpnDco_Process" />
-            <Custom Action="OvpnDco_Process" After="InstallFiles" />
+            <Custom Action="OvpnDco_Evaluate" Before="OvpnDco_Process">WIN102004</Custom>
+            <Custom Action="OvpnDco_Process" After="InstallFiles">WIN102004</Custom>
         </InstallExecuteSequence>
 
     </Module>
