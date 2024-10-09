@@ -452,7 +452,7 @@ OvpnPeerNewKey(POVPN_DEVICE device, WDFREQUEST request)
     BCRYPT_ALG_HANDLE algHandle = NULL;
     GOTO_IF_NOT_NT_SUCCESS(done, status, OvpnPeerGetAlgHandle(device, cryptoData->CipherAlg, algHandle));
 
-    OvpnPeerContext* peer = OvpnGetFirstPeer(&device->Peers);
+    OvpnPeerContext* peer = OvpnFindPeer(device, cryptoData->PeerId);
     if (peer == NULL) {
         status = STATUS_OBJECTID_NOT_FOUND;
         goto done;
@@ -488,7 +488,7 @@ OvpnPeerNewKeyV2(POVPN_DEVICE device, WDFREQUEST request)
     BCRYPT_ALG_HANDLE algHandle = NULL;
     GOTO_IF_NOT_NT_SUCCESS(done, status, OvpnPeerGetAlgHandle(device, cryptoDataV2->V1.CipherAlg, algHandle));
 
-    OvpnPeerContext* peer = OvpnGetFirstPeer(&device->Peers);
+    OvpnPeerContext* peer = OvpnFindPeer(device, cryptoDataV2->V1.PeerId);
     if (peer == NULL) {
         status = STATUS_OBJECTID_NOT_FOUND;
         goto done;
