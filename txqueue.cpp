@@ -41,7 +41,7 @@ _Requires_shared_lock_held_(device->SpinLock)
 static
 NTSTATUS
 OvpnTxProcessPacket(_In_ POVPN_DEVICE device, _In_ POVPN_TXQUEUE queue, _In_ NET_RING_PACKET_ITERATOR *pi,
-    _Inout_ OVPN_TX_BUFFER **head, _Inout_ OVPN_TX_BUFFER** tail)
+    _Inout_ OVPN_TX_BUFFER **head, _Inout_ OVPN_TX_BUFFER** tail, _Inout_ SOCKADDR **headSockaddr)
 {
     NET_RING_FRAGMENT_ITERATOR fi = NetPacketIteratorGetFragments(pi);
 
@@ -129,14 +129,27 @@ OvpnTxProcessPacket(_In_ POVPN_DEVICE device, _In_ POVPN_TXQUEUE queue, _In_ NET
             buffer->WskBufList.Buffer.Mdl = buffer->Mdl;
             buffer->WskBufList.Buffer.Offset = FIELD_OFFSET(OVPN_TX_BUFFER, Head) + (ULONG)(buffer->Data - buffer->Head);
 
-            if (*head == NULL) {
+            // If this peer is different (head sockaddr != peer sockaddr) to the previous buffer chain peers,
+            // then flush those and restart with a new buffer list.
+
+            if ((*head != NULL) && *headSockaddr != (SOCKADDR*)&(peer->TransportAddrs.Remote))
+            {
+                LOG_IF_NOT_NT_SUCCESS(OvpnSocketSend(&device->Socket, *head, *headSockaddr));
                 *head = buffer;
+                *tail = buffer;
+                *headSockaddr = (SOCKADDR*)&(peer->TransportAddrs.Remote);
             }
             else {
-                (*tail)->WskBufList.Next = &buffer->WskBufList;
-            }
+                if (*head == NULL) {
+                    *head = buffer;
+                    *headSockaddr = (SOCKADDR*)&(peer->TransportAddrs.Remote);
+                }
+                else {
+                    (*tail)->WskBufList.Next = &buffer->WskBufList;
+                }
 
-            *tail = buffer;
+                *tail = buffer;
+            }
         }
 
         OvpnTimerResetXmit(peer->Timer);
@@ -169,12 +182,13 @@ OvpnEvtTxQueueAdvance(NETPACKETQUEUE netPacketQueue)
 
     OVPN_TX_BUFFER* txBufferHead = NULL;
     OVPN_TX_BUFFER* txBufferTail = NULL;
+    SOCKADDR* headSockaddr = NULL;
 
     while (NetPacketIteratorHasAny(&pi)) {
         NET_PACKET* packet = NetPacketIteratorGetPacket(&pi);
         NTSTATUS status = STATUS_SUCCESS;
         if (!packet->Ignore && !packet->Scratch) {
-            status = OvpnTxProcessPacket(device, queue, &pi, &txBufferHead, &txBufferTail);
+            status = OvpnTxProcessPacket(device, queue, &pi, &txBufferHead, &txBufferTail, &headSockaddr);
             if (!NT_SUCCESS(status)) {
                 InterlockedIncrementNoFence(&device->Stats.LostOutDataPackets);
             }
@@ -191,15 +205,9 @@ OvpnEvtTxQueueAdvance(NETPACKETQUEUE netPacketQueue)
     NetPacketIteratorSet(&pi);
 
     if (packetSent) {
-        // TODO: get actual peer
-        OvpnPeerContext* peer = OvpnGetFirstPeer(&device->Peers);
-        if (peer != NULL) {
-            OvpnTimerResetXmit(peer->Timer);
-
-            if (!device->Socket.Tcp) {
-                // this will use WskSendMessages to send buffers list which we constructed before
-                LOG_IF_NOT_NT_SUCCESS(OvpnSocketSend(&device->Socket, txBufferHead, (SOCKADDR*)&peer->TransportAddrs.Remote));
-            }
+        if (!device->Socket.Tcp) {
+            // this will use WskSendMessages to send buffers list which we constructed before
+            LOG_IF_NOT_NT_SUCCESS(OvpnSocketSend(&device->Socket, txBufferHead, headSockaddr));
         }
     }
 
