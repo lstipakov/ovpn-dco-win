@@ -50,7 +50,7 @@ OvpnPeerCtxFree(OvpnPeerContext* peer)
 
 _Use_decl_annotations_
 PVOID
-OvpnPeerAllocateRoutine(_RTL_GENERIC_TABLE* table, CLONG size)
+OvpnPeerAllocateRoutine(RTL_GENERIC_TABLE* table, CLONG size)
 {
     UNREFERENCED_PARAMETER(table);
 
@@ -59,7 +59,7 @@ OvpnPeerAllocateRoutine(_RTL_GENERIC_TABLE* table, CLONG size)
 
 _Use_decl_annotations_
 VOID
-OvpnPeerFreeRoutine(_RTL_GENERIC_TABLE* table, PVOID buffer)
+OvpnPeerFreeRoutine(RTL_GENERIC_TABLE* table, PVOID buffer)
 {
     UNREFERENCED_PARAMETER(table);
 
@@ -67,7 +67,7 @@ OvpnPeerFreeRoutine(_RTL_GENERIC_TABLE* table, PVOID buffer)
 }
 
 RTL_GENERIC_COMPARE_RESULTS
-OvpnPeerCompareByPeerIdRoutine(_RTL_GENERIC_TABLE* table, PVOID first, PVOID second)
+OvpnPeerCompareByPeerIdRoutine(RTL_GENERIC_TABLE* table, PVOID first, PVOID second)
 {
     UNREFERENCED_PARAMETER(table);
 
@@ -83,7 +83,7 @@ OvpnPeerCompareByPeerIdRoutine(_RTL_GENERIC_TABLE* table, PVOID first, PVOID sec
 }
 
 RTL_GENERIC_COMPARE_RESULTS
-OvpnPeerCompareByVPN4Routine(_RTL_GENERIC_TABLE* table, PVOID first, PVOID second)
+OvpnPeerCompareByVPN4Routine(RTL_GENERIC_TABLE* table, PVOID first, PVOID second)
 {
     UNREFERENCED_PARAMETER(table);
 
@@ -100,7 +100,7 @@ OvpnPeerCompareByVPN4Routine(_RTL_GENERIC_TABLE* table, PVOID first, PVOID secon
 }
 
 RTL_GENERIC_COMPARE_RESULTS
-OvpnPeerCompareByVPN6Routine(_RTL_GENERIC_TABLE* table, PVOID first, PVOID second)
+OvpnPeerCompareByVPN6Routine(RTL_GENERIC_TABLE* table, PVOID first, PVOID second)
 {
     UNREFERENCED_PARAMETER(table);
 
