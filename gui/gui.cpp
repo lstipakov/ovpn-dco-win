@@ -23,7 +23,8 @@ HWND hMPListenAddress, hMPListenPort,
     hP2PRemoteAddress, hP2PRemotePort,
     hCCMessage, hCCRemoteAddress, hCCRemotePort,
     hMPNewPeerLocalIP, hMPNewPeerLocalPort, hMPNewPeerRemoteIP, hMPNewPeerRemotePort, hMPNewPeerVPNIP, hMPNewPeerPeerId,
-    hNewKeyPeerId;
+    hNewKeyPeerId,
+    hSetPeerPeerId, hSetPeerInterval, hSetPeerTimeout, hSetPeerMSS;
 
 HWND hLogArea;
 std::unordered_map<DWORD, std::wstring> buttons = {
@@ -40,6 +41,7 @@ std::unordered_map<DWORD, std::wstring> buttons = {
     {OVPN_IOCTL_MP_START_VPN, L"MP Start VPN"},
     {OVPN_IOCTL_MP_NEW_PEER, L"MP New Peer"},
     {OVPN_IOCTL_NEW_KEY, L"New Key"},
+    {OVPN_IOCTL_SET_PEER, L"Set Peer"}
 };
 
 #define MIN_FUNCTION_CODE 1
@@ -424,6 +426,50 @@ NewKey()
 }
 
 void
+SetPeer()
+{
+    wchar_t peerId[6], interval[6], timeout[6], mss[6];
+
+    GetWindowText(hSetPeerPeerId, peerId, 16);
+    GetWindowText(hSetPeerInterval, interval, 16);
+    GetWindowText(hSetPeerTimeout, timeout, 16);
+    GetWindowText(hSetPeerMSS, mss, 16);
+
+    bool mp = SendMessage(hModes[1], BM_GETCHECK, 0, 0) == BST_CHECKED;
+
+    if (mp) {
+        OVPN_MP_SET_PEER set_peer = {};
+        set_peer.PeerId = _wtoi(peerId);
+        set_peer.KeepaliveInterval = _wtoi(interval);
+        set_peer.KeepaliveTimeout = _wtoi(timeout);
+        set_peer.MSS = _wtoi(mss);
+
+        DWORD bytesReturned;
+        if (!DeviceIoControl(hDev, OVPN_IOCTL_MP_SET_PEER, &set_peer, sizeof(set_peer), NULL, 0, &bytesReturned, NULL)) {
+            Log("DeviceIoControl(OVPN_IOCTL_MP_SET_PEER) failed with code ", GetLastError());
+        }
+        else {
+            Log("MP Peer set", peerId);
+        }
+    } else {
+        OVPN_SET_PEER set_peer = {};
+        set_peer.KeepaliveInterval = _wtoi(interval);
+        set_peer.KeepaliveTimeout = _wtoi(timeout);
+        set_peer.MSS = _wtoi(mss);
+
+        DWORD bytesReturned;
+        if (!DeviceIoControl(hDev, OVPN_IOCTL_SET_PEER, &set_peer, sizeof(set_peer), NULL, 0, &bytesReturned, NULL)) {
+            Log("DeviceIoControl(OVPN_IOCTL_SET_PEER) failed with code ", GetLastError());
+        }
+        else {
+            Log("Peer set");
+        }
+    }
+
+    
+}
+
+void
 CreatePushButton(HWND hWnd, DWORD ioctl, int x, int y)
 {
     CreateWindowW(L"Button", buttons[ioctl].c_str(), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, x, y, 100, 30,
@@ -522,6 +568,12 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         CreatePushButton(hwnd, OVPN_IOCTL_NEW_KEY, 10, 260);
         hNewKeyPeerId = CreateEditBox(hwnd, L"1", 150, 260, 60);
 
+        CreatePushButton(hwnd, OVPN_IOCTL_SET_PEER, 10, 310);
+        hSetPeerPeerId = CreateEditBox(hwnd, L"1", 150, 310, 60);
+        hSetPeerInterval = CreateEditBox(hwnd, L"5", 240, 310, 60);
+        hSetPeerTimeout = CreateEditBox(hwnd, L"30", 330, 310, 60);
+        hSetPeerMSS = CreateEditBox(hwnd, L"-1", 420, 310, 60);
+
         SendMessage(hModes[0], BM_SETCHECK, BST_CHECKED, 0);
 
         // log area
@@ -568,6 +620,9 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             case OVPN_IOCTL_NEW_KEY:
                 NewKey();
                 break;
+
+            case OVPN_IOCTL_SET_PEER:
+                SetPeer();
             }
         }
         else if ((ULONG)wp == BTN_SEND_CC) {
