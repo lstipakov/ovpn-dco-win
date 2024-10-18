@@ -91,9 +91,10 @@ static VOID OvpnTimerXmit(WDFTIMER timer)
 
     if (NT_SUCCESS(status)) {
         // start async send, completion handler will return ciphertext buffer to the pool
-        LOG_IF_NOT_NT_SUCCESS(status = OvpnSocketSend(&device->Socket, buffer, NULL));
+        SOCKADDR* sa = (SOCKADDR*)&(peer->TransportAddrs.Remote);
+        LOG_IF_NOT_NT_SUCCESS(status = OvpnSocketSend(&device->Socket, buffer, sa));
         if (NT_SUCCESS(status)) {
-            LOG_INFO("Ping sent");
+            LOG_INFO("Ping sent", TraceLoggingValue(peer->PeerId, "peer-id"));
         }
     }
     else {

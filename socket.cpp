@@ -254,16 +254,16 @@ VOID OvpnSocketDataPacketReceived(_In_ POVPN_DEVICE device, UCHAR op, UINT32 pee
 
     // ping packet?
     if (OvpnTimerIsKeepaliveMessage(buffer->Data, buffer->Len)) {
-        LOG_INFO("Ping received");
+        LOG_INFO("Ping received", TraceLoggingValue(peer->PeerId, "peer-id"));
 
         // no need to inject ping packet into OS, return buffer to the pool
         OvpnRxBufferPoolPut(buffer);
     }
     else {
         if (OvpnMssIsIPv4(buffer->Data, buffer->Len)) {
-            OvpnMssDoIPv4(buffer->Data, buffer->Len, device->MSS);
+            OvpnMssDoIPv4(buffer->Data, buffer->Len, peer->MSS);
         } else if (OvpnMssIsIPv6(buffer->Data, buffer->Len)) {
-            OvpnMssDoIPv6(buffer->Data, buffer->Len, device->MSS);
+            OvpnMssDoIPv6(buffer->Data, buffer->Len, peer->MSS);
         }
 
         // enqueue plaintext buffer, it will be dequeued by NetAdapter RX datapath
