@@ -42,6 +42,8 @@ struct OvpnPeerContext
     // 1-sec timer which handles ping intervals and keepalive timeouts
     WDFTIMER Timer;
 
+    UINT16 MSS;
+
     struct {
         IN_ADDR IPv4;
         IN6_ADDR IPv6;
@@ -90,6 +92,11 @@ _Must_inspect_result_
 _Requires_exclusive_lock_held_(device->SpinLock)
 NTSTATUS
 OvpnPeerSet(_In_ POVPN_DEVICE device, WDFREQUEST request);
+
+_Must_inspect_result_
+_Requires_exclusive_lock_held_(device->SpinLock)
+NTSTATUS
+OvpnMPPeerSet(_In_ POVPN_DEVICE device, WDFREQUEST request);
 
 _Must_inspect_result_
 NTSTATUS

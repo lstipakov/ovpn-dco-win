@@ -316,6 +316,7 @@ OvpnDeviceCheckMode(OVPN_MODE mode, ULONG code)
         // those IOCTLs are for MP mode
         case OVPN_IOCTL_MP_START_VPN:
         case OVPN_IOCTL_MP_NEW_PEER:
+        case OVPN_IOCTL_MP_SET_PEER:
             return FALSE;
         }
     }
@@ -501,6 +502,12 @@ OvpnEvtIoDeviceControl(WDFQUEUE queue, WDFREQUEST request, size_t outputBufferLe
 
     case OVPN_IOCTL_MP_NEW_PEER:
         status = OvpnMPPeerNew(device, request);
+        break;
+
+    case OVPN_IOCTL_MP_SET_PEER:
+        kirql = ExAcquireSpinLockExclusive(&device->SpinLock);
+        status = OvpnMPPeerSet(device, request);
+        ExReleaseSpinLockExclusive(&device->SpinLock, kirql);
         break;
 
     default:

@@ -78,18 +78,24 @@ OvpnTxProcessPacket(_In_ POVPN_DEVICE device, _In_ POVPN_TXQUEUE queue, _In_ NET
     }
 
     OvpnPeerContext* peer = NULL;
+
     if (OvpnMssIsIPv4(buffer->Data, buffer->Len)) {
-        OvpnMssDoIPv4(buffer->Data, buffer->Len, device->MSS);
-        peer = OvpnFindPeerVPN4(device, ((IPV4_HEADER*)buffer->Data)->DestinationAddress);
+        auto addr = ((IPV4_HEADER*)buffer->Data)->DestinationAddress;
+        peer = OvpnFindPeerVPN4(device, addr);
+        if (peer != NULL) {
+            OvpnMssDoIPv4(buffer->Data, buffer->Len, peer->MSS);
+        }
     } else if (OvpnMssIsIPv6(buffer->Data, buffer->Len)) {
-        OvpnMssDoIPv6(buffer->Data, buffer->Len, device->MSS);
-        peer = OvpnFindPeerVPN6(device, ((IPV6_HEADER*)buffer->Data)->DestinationAddress);
+        auto addr = ((IPV6_HEADER*)buffer->Data)->DestinationAddress;
+        peer = OvpnFindPeerVPN6(device, addr);
+        if (peer != NULL) {
+            OvpnMssDoIPv6(buffer->Data, buffer->Len, peer->MSS);
+        }
     }
 
     if (peer == NULL) {
         status = STATUS_ADDRESS_NOT_ASSOCIATED;
         OvpnTxBufferPoolPut(buffer);
-        LOG_WARN("No peer");
         goto out;
     }
 

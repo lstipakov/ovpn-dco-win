@@ -283,6 +283,13 @@ OvpnMPPeerNew(POVPN_DEVICE device, WDFREQUEST request)
 
     peerCtx->PeerId = peer->PeerId;
 
+    // create peer-specific timer
+    LOG_IF_NOT_NT_SUCCESS(status = OvpnTimerCreate(device->WdfDevice, peerCtx, &peerCtx->Timer));
+    if (status != STATUS_SUCCESS) {
+        OvpnPeerCtxFree(peerCtx);
+        goto done;
+    }
+
     kirql = ExAcquireSpinLockExclusive(&device->SpinLock);
     LOG_IF_NOT_NT_SUCCESS(status = OvpnAddPeer(device, peerCtx));
     if (status == STATUS_SUCCESS) {
@@ -318,6 +325,27 @@ done:
     return status;
 }
 
+VOID OvpnPeerSetDoWork(OvpnPeerContext *peer, LONG keepaliveInterval, LONG keepaliveTimeout, LONG mss)
+{
+    if (mss != -1) {
+        peer->MSS = (UINT16)mss;
+    }
+
+    if (keepaliveInterval != -1) {
+        peer->KeepaliveInterval = keepaliveInterval;
+
+        // keepalive xmit timer, sends ping packets
+        OvpnTimerSetXmitInterval(peer->Timer, peer->KeepaliveInterval);
+    }
+
+    if (keepaliveTimeout != -1) {
+        peer->KeepaliveTimeout = keepaliveTimeout;
+
+        // keepalive recv timer, detects keepalive timeout
+        OvpnTimerSetRecvTimeout(peer->Timer, peer->KeepaliveTimeout);
+    }
+}
+
 _Use_decl_annotations_
 NTSTATUS OvpnPeerSet(POVPN_DEVICE device, WDFREQUEST request)
 {
@@ -340,23 +368,36 @@ NTSTATUS OvpnPeerSet(POVPN_DEVICE device, WDFREQUEST request)
         TraceLoggingValue(set_peer->KeepaliveTimeout, "timeout"),
         TraceLoggingValue(set_peer->MSS, "MSS"));
 
-    if (set_peer->MSS != -1) {
-        device->MSS = (UINT16)set_peer->MSS;
+    OvpnPeerSetDoWork(peer, set_peer->KeepaliveInterval, set_peer->KeepaliveTimeout, set_peer->MSS);
+
+done:
+    LOG_EXIT();
+    return status;
+}
+
+_Use_decl_annotations_
+NTSTATUS OvpnMPPeerSet(POVPN_DEVICE device, WDFREQUEST request)
+{
+    LOG_ENTER();
+
+    NTSTATUS status = STATUS_SUCCESS;
+
+    POVPN_MP_SET_PEER set_peer = NULL;
+    GOTO_IF_NOT_NT_SUCCESS(done, status, WdfRequestRetrieveInputBuffer(request, sizeof(OVPN_MP_SET_PEER), (PVOID*)&set_peer, nullptr));
+
+    LOG_INFO("MP Set peer", TraceLoggingValue(set_peer->PeerId, "peer-id"),
+        TraceLoggingValue(set_peer->KeepaliveInterval, "interval"),
+        TraceLoggingValue(set_peer->KeepaliveTimeout, "timeout"),
+        TraceLoggingValue(set_peer->MSS, "MSS"));
+
+    OvpnPeerContext* peer = OvpnFindPeer(device, set_peer->PeerId);
+    if (peer == NULL) {
+        LOG_ERROR("Peer not found", TraceLoggingValue(set_peer->PeerId, "peer-id"));
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        goto done;
     }
 
-    if (set_peer->KeepaliveInterval != -1) {
-        peer->KeepaliveInterval = set_peer->KeepaliveInterval;
-
-        // keepalive xmit timer, sends ping packets
-        OvpnTimerSetXmitInterval(peer->Timer, peer->KeepaliveInterval);
-    }
-
-    if (peer->KeepaliveTimeout != -1) {
-        peer->KeepaliveTimeout = set_peer->KeepaliveTimeout;
-
-        // keepalive recv timer, detects keepalive timeout
-        OvpnTimerSetRecvTimeout(peer->Timer, peer->KeepaliveTimeout);
-    }
+    OvpnPeerSetDoWork(peer, set_peer->KeepaliveInterval, set_peer->KeepaliveTimeout, set_peer->MSS);
 
 done:
     LOG_EXIT();
