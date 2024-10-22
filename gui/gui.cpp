@@ -15,6 +15,7 @@
 #define VER_DEV_NAME L"\\\\.\\ovpn-dco-ver"
 
 #define BTN_SEND_CC 100
+#define BTN_SUBSCRIBE_NOTIF 101
 
 LRESULT CALLBACK WindowProcedure(HWND, UINT, WPARAM, LPARAM);
 
@@ -203,8 +204,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR args, int ncmdsho
     ovNotif.hEvent = hEvNotif;
 
     StartOverlappedRead();
-
-    StartOverlappedNotif();
 
     while (true) {
         HANDLE events[] = { hEvRead, hEvWrite, hEvNotif };
@@ -616,6 +615,8 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         hCCRemoteAddress = CreateEditBox(hwnd, L"192.168.100.1", 290, 160, 120);
         hCCRemotePort = CreateEditBox(hwnd, L"1194", 430, 160, 60);
 
+        CreatePushButton(hwnd, L"Subscribe notif", (HMENU)BTN_SUBSCRIBE_NOTIF, 640, 160);
+
         CreatePushButton(hwnd, OVPN_IOCTL_MP_NEW_PEER, 10, 210);
         hMPNewPeerLocalIP = CreateEditBox(hwnd, L"192.168.100.2", 150, 210, 120);
         hMPNewPeerLocalPort = CreateEditBox(hwnd, L"1194", 290, 210, 60);
@@ -686,6 +687,8 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         else if ((ULONG)wp == BTN_SEND_CC) {
             SendCC();
+        } else if ((ULONG)wp == BTN_SUBSCRIBE_NOTIF) {
+            StartOverlappedNotif();
         }
 
     }
