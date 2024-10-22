@@ -60,6 +60,19 @@ std::vector<std::pair<OVPN_MODE, std::wstring>> modeData = {
 
 std::vector<HWND> hModes;
 
+std::vector<const char*> notifCmds = {
+    "peer deleted",
+    "key rotation"
+};
+
+std::vector<const char*> delPeerReasons = {
+    "teardown",
+    "userspace",
+    "expired",
+    "trtansport error",
+    "transport disconnect"
+};
+
 template <typename... Args>
 void Log(Args... args) {
     std::wstringstream stream;
@@ -80,7 +93,7 @@ void Log(Args... args) {
 
 HANDLE hDev;
 char readBuffer[4096] = {0};
-OVERLAPPED ovRead = {0}, ovWrite = {0};
+OVERLAPPED ovRead = {0}, ovWrite = {0}, ovNotif = {0};
 
 bool StartOverlappedRead() {
     ZeroMemory(readBuffer, sizeof(readBuffer));
@@ -90,6 +103,75 @@ bool StartOverlappedRead() {
         return false;
     }
     return true;
+}
+
+OVPN_NOTIFY_EVENT notifEvent = {0};
+
+bool StartOverlappedNotif() {
+    if (!DeviceIoControl(hDev, OVPN_IOCTL_NOTIFY_EVENT, NULL, 0, &notifEvent, sizeof(notifEvent), NULL, &ovNotif)) {
+        if (GetLastError() != ERROR_IO_PENDING) {
+            Log("Failed to start notification read: ", GetLastError());
+            return false;
+        }
+    }
+    return true;
+}
+
+bool OnReadCompleted()
+{
+    DWORD bytesRead;
+    if (GetOverlappedResult(hDev, &ovRead, &bytesRead, FALSE)) {
+        if (bytesRead > 0) {
+            bool mp = SendMessage(hModes[1], BM_GETCHECK, 0, 0) == BST_CHECKED;
+
+            // if we're in server mode, we've received CC message prepended with sockaddr
+            if (mp) {
+                SOCKADDR_IN *sa = (SOCKADDR_IN *)readBuffer;
+
+                char ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &(sa->sin_addr), ip, sizeof(ip));
+
+                int port = ntohs(sa->sin_port);
+
+                Log("CC[", ip, ":", port, "]> ", readBuffer + sizeof(*sa));
+            } else {
+                Log("CC[]> ", readBuffer);
+            }
+        }
+    } else {
+        Log("Overlapped read failed: ", GetLastError());
+    }
+
+    return StartOverlappedRead();
+}
+
+bool OnNotifyCompleted()
+{
+    DWORD bytesRead;
+    if (GetOverlappedResult(hDev, &ovNotif, &bytesRead, FALSE)) {
+        if (bytesRead > 0) {
+            Log("Notification: ",
+                "Cmd: ", notifCmds[notifEvent.Cmd],
+                ", peer-id: ", notifEvent.PeerId,
+                ", del reason: ", delPeerReasons[notifEvent.DelPeerReason]);
+        }
+    } else {
+        Log("Notif read failed: ", GetLastError());
+    }
+
+    return StartOverlappedNotif();
+}
+
+void OnWriteCompleted()
+{
+    DWORD bytesWrote;
+    if (GetOverlappedResult(hDev, &ovWrite, &bytesWrote, FALSE)) {
+        if (bytesWrote > 0) {
+            Log("Wrote ", bytesWrote, " bytes");
+        }
+    } else {
+        Log("Overlapped write failed: ", GetLastError());
+    }
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR args, int ncmdshow)
@@ -117,52 +199,29 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR args, int ncmdsho
     HANDLE hEvWrite = CreateEventW(NULL, FALSE, FALSE, NULL);
     ovWrite.hEvent = hEvWrite;
 
+    HANDLE hEvNotif = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ovNotif.hEvent = hEvNotif;
+
     StartOverlappedRead();
 
+    StartOverlappedNotif();
+
     while (true) {
-        HANDLE events[] = { hEvRead, hEvWrite };
-        DWORD waitResult = MsgWaitForMultipleObjects(2, events, FALSE, INFINITE, QS_ALLINPUT);
+        HANDLE events[] = { hEvRead, hEvWrite, hEvNotif };
+        DWORD waitResult = MsgWaitForMultipleObjects(3, events, FALSE, INFINITE, QS_ALLINPUT);
 
-        // read completed
         if (waitResult == WAIT_OBJECT_0) {
-            DWORD bytesRead;
-            if (GetOverlappedResult(hDev, &ovRead, &bytesRead, FALSE)) {
-                if (bytesRead > 0) {
-                    bool mp = SendMessage(hModes[1], BM_GETCHECK, 0, 0) == BST_CHECKED;
-
-                    // if we're in server mode, we've received CC message prepended with sockaddr
-                    if (mp) {
-                        SOCKADDR_IN *sa = (SOCKADDR_IN *)readBuffer;
-
-                        char ip[INET_ADDRSTRLEN];
-                        inet_ntop(AF_INET, &(sa->sin_addr), ip, sizeof(ip));
-
-                        int port = ntohs(sa->sin_port);
-
-                        Log("CC[", ip, ":", port, "]> ", readBuffer + sizeof(*sa));
-                    } else {
-                        Log("CC[]> ", readBuffer);
-                    }
-                }
-            } else {
-                Log("Overlapped read failed: ", GetLastError());
-            }
-
-            if (!StartOverlappedRead()) {
+            if (!OnReadCompleted()) {
                 break;
             }
         } if (waitResult == WAIT_OBJECT_0 + 1) {
-            // write completed
-            DWORD bytesWrote;
-            if (GetOverlappedResult(hDev, &ovWrite, &bytesWrote, FALSE)) {
-                if (bytesWrote > 0) {
-                    Log("Wrote ", bytesWrote, " bytes");
-                }
-            } else {
-                Log("Overlapped write failed: ", GetLastError());
+            OnWriteCompleted();
+        } if (waitResult == WAIT_OBJECT_0 + 2) {
+            if (!OnNotifyCompleted()) {
+                break;
             }
         }
-        else if (waitResult == WAIT_OBJECT_0 + 2) {
+        else if (waitResult == WAIT_OBJECT_0 + 3) {
             // window messaging loop
             MSG msg;
             while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
