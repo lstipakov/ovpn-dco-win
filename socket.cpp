@@ -213,40 +213,30 @@ VOID OvpnSocketDataPacketReceived(_In_ POVPN_DEVICE device, UCHAR op, UINT32 pee
 
     // If we're at dispatch level, we can use a small optimization and use function
     // which is not calling KeRaiseIRQL to raise the IRQL to DISPATCH_LEVEL before attempting to acquire the lock
-    KIRQL kirql = 0;
-    if (dpc) {
-        ExAcquireSpinLockSharedAtDpcLevel(&peer->SpinLock);
-    }
-    else {
-        kirql = ExAcquireSpinLockShared(&peer->SpinLock);
-    }
+
+    KIRQL kirql = OvpnAcquireSpinLock(dpc, &peer->SpinLock, FALSE);
+
+    BOOLEAN exclusive = FALSE;
+    BOOLEAN aeadTagEnd = FALSE;
+    ULONG pktIdLen = 0;
 
     OvpnCryptoContext* cryptoContext = &peer->CryptoContext;
 
     if (cryptoContext->Decrypt) {
         UCHAR keyId = OvpnCryptoKeyIdExtract(op);
-        OvpnCryptoKeySlot* keySlot = OvpnCryptoKeySlotFromKeyId(cryptoContext, keyId);
-        if (!keySlot) {
-            status = STATUS_INVALID_DEVICE_STATE;
 
-            LOG_ERROR("keyId <keyId> not found", TraceLoggingValue(keyId, "keyId"));
-        }
-        else {
-            // extend data area in the buffer for plaintext and crypto overhead
-            OvpnBufferPut(buffer, len);
+        // extend data area in the buffer for plaintext and crypto overhead
+        OvpnBufferPut(buffer, len);
 
-            // decrypt into plaintext buffer
-            status = cryptoContext->Decrypt(keySlot, cipherTextBuf, len, buffer->Data, cryptoContext->CryptoOptions);
+        OvpnCryptoDecryptParams decryptParams = { keyId, cipherTextBuf, len, buffer->Data, &aeadTagEnd, &pktIdLen };
+        status = OvpnCryptoCallWithRetry(peer, dpc, &exclusive, dpc ? nullptr : &kirql, OvpnCryptoInvokeDecrypt, &decryptParams);
 
-            // trim AEAD tag an the end
-            auto aeadTagEnd = cryptoContext->CryptoOptions & CRYPTO_OPTIONS_AEAD_TAG_END;
+        if (NT_SUCCESS(status)) {
             if (aeadTagEnd) {
                 OvpnBufferTrim(buffer, len - AEAD_AUTH_TAG_LEN);
             }
 
-            // remove crypto overhead in front
-            auto pktId64bit = cryptoContext->CryptoOptions & CRYPTO_OPTIONS_64BIT_PKTID;
-            auto cryptoOverheadFront = OVPN_DATA_V2_LEN + (pktId64bit ? 8 : 4) + (aeadTagEnd ? 0 : AEAD_AUTH_TAG_LEN);
+            auto cryptoOverheadFront = OVPN_DATA_V2_LEN + pktIdLen + (aeadTagEnd ? 0 : AEAD_AUTH_TAG_LEN);
             OvpnBufferPull(buffer, cryptoOverheadFront);
         }
     }
@@ -266,12 +256,7 @@ VOID OvpnSocketDataPacketReceived(_In_ POVPN_DEVICE device, UCHAR op, UINT32 pee
     auto mss = peer->MSS;
 
     // don't forget to release spinlock
-    if (dpc) {
-        ExReleaseSpinLockSharedFromDpcLevel(&peer->SpinLock);
-    }
-    else {
-        ExReleaseSpinLockShared(&peer->SpinLock, kirql);
-    }
+    OvpnReleaseSpinLock(dpc, kirql, &peer->SpinLock, exclusive);
 
     // decrypt failed - don't proceed
     if (!NT_SUCCESS(status)) {
