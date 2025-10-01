@@ -1,0 +1,24 @@
+﻿#include <gtest/gtest.h>
+#include <memory>
+
+#include "../crypto_epoch.h"
+
+// Demonstrate some basic assertions.
+TEST(CryptoTest, HkdfExpand1) {
+    BCRYPT_ALG_HANDLE hkdfAlgHandle;
+    ASSERT_EQ(BCryptOpenAlgorithmProvider(&hkdfAlgHandle, BCRYPT_HKDF_ALGORITHM, NULL, 0), STATUS_SUCCESS);
+
+    uint8_t secret[32] = { 0x07, 0x77, 0x09, 0x36, 0x2c, 0x2e, 0x32, 0xdf, 0x0d, 0xdc, 0x3f,
+                           0x0d, 0xc4, 0x7b, 0xba, 0x63, 0x90, 0xb6, 0xc7, 0x3b, 0xb5, 0x0f,
+                           0x9c, 0x31, 0x22, 0xec, 0x84, 0x4a, 0xd7, 0xc2, 0xb3, 0xe5 };
+
+    const char* label = "unit test";
+
+    uint8_t out_expected[16] = { 0x18, 0x5e, 0xaa, 0x1c, 0x7f, 0x22, 0x8a, 0xb8,
+                                 0xeb, 0x29, 0x77, 0x32, 0x14, 0xd9, 0x20, 0x46 };
+
+    uint8_t out[16];
+
+    ASSERT_EQ(OvpnCryptoExpandLabel(hkdfAlgHandle, secret, sizeof(out), label, out), STATUS_SUCCESS);
+    ASSERT_EQ(0, std::memcmp(out, out_expected, sizeof(out)));
+}
